@@ -1,5 +1,7 @@
 # Sentinelle Santé — application mobile React Native
 
+Dépôt : [forastech-team/sentinelle-mobile](https://github.com/forastech-team/sentinelle-mobile)
+
 Application **React Native / Expo (SDK 58)** autonome qui lit les données de santé de l'utilisateur
 depuis **Health Connect** (API santé de Google sur Android) et les envoie au backend Sentinelle.
 

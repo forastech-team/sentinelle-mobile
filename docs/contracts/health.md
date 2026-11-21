@@ -41,10 +41,6 @@ doit utiliser `Idempotency-Key` pour dédupliquer les tentatives légitimes. Un 
     { "accessType": "read", "recordType": "HeartRate" },
     { "accessType": "read", "recordType": "Steps" }
   ],
-  "limits": {
-    "maxRecordsPerType": 1000,
-    "truncatedTypes": []
-  },
   "readCounts": {
     "HeartRate": 1,
     "Steps": 3
@@ -54,6 +50,10 @@ doit utiliser `Idempotency-Key` pour dédupliquer les tentatives légitimes. Un 
     "Steps": 3
   },
   "readErrors": [],
+  "limits": {
+    "maxRecordsPerType": 1000,
+    "truncatedTypes": []
+  },
   "records": [
     {
       "type": "Steps",

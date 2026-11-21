@@ -13,7 +13,13 @@ import {
 
 import { sendHealthPayload, type SendResult } from './backend/client';
 import { loadBackendConfig, saveBackendToken, saveBackendUrl } from './backend/config';
-import { BackendConfigurationError, backendHost, validateBackendUrl } from './backend/url';
+import {
+  BackendConfigurationError,
+  backendHost,
+  checkSendTarget,
+  isTokenRebind,
+  validateBackendUrl,
+} from './backend/url';
 import {
   checkHealthConnect,
   currentHealthPermissions,
@@ -75,7 +81,9 @@ export default function App() {
   const [snapshot, setSnapshot] = useState<HealthSnapshot | null>(null);
   const [payload, setPayload] = useState<HealthPayload | null>(null);
   const [baseUrl, setBaseUrl] = useState('');
+  const [savedHost, setSavedHost] = useState<string | null>(null);
   const [token, setToken] = useState('');
+  const [tokenHost, setTokenHost] = useState<string | null>(null);
   const [lastSync, setLastSync] = useState<string | null>(null);
   const [busy, setBusy] = useState<Busy>(null);
   const [message, setMessage] = useState('Chargement…');
@@ -95,7 +103,9 @@ export default function App() {
         setSdkState(health.state);
         setInitialized(health.initialized);
         setBaseUrl(config.baseUrl);
+        setSavedHost(backendHost(config.baseUrl));
         setToken(config.token ?? '');
+        setTokenHost(config.tokenHost ?? null);
         setLastSync(storedSync);
 
         if (health.state === 'available' && health.initialized) {
@@ -168,9 +178,25 @@ export default function App() {
     setMessage('');
     try {
       const validated = validateBackendUrl(baseUrl);
+      const newHost = backendHost(validated);
+      if (!newHost) {
+        setMessage("L'URL du backend est invalide.");
+        return;
+      }
+      const existing = await loadBackendConfig();
       const trimmedToken = token.trim();
+
+      // Un jeton chargé depuis le trousseau ne doit jamais être réassigné à un autre hôte.
+      if (isTokenRebind(existing, trimmedToken, newHost)) {
+        setToken('');
+        setMessage('Ce jeton est lié à un autre hôte. Saisissez un jeton pour ce nouvel hôte.');
+        return;
+      }
+
       setBaseUrl(validated);
+      setSavedHost(newHost);
       setToken(trimmedToken);
+      setTokenHost(trimmedToken ? newHost : null);
       await Promise.all([
         saveBackendUrl(validated),
         saveBackendToken(trimmedToken, validated),
@@ -208,10 +234,14 @@ export default function App() {
         setMessage('Permissions rafraîchies avant l’envoi.');
       }
 
-      const result = await sendHealthPayload(
-        { baseUrl, ...(token.trim() ? { token: token.trim() } : {}) },
-        toSend,
-      );
+      // Le jeton utilisé est relu depuis le trousseau : jamais depuis le champ modifiable.
+      const checked = checkSendTarget(baseUrl, await loadBackendConfig());
+      if (!checked.ok) {
+        setMessage(checked.message);
+        return;
+      }
+
+      const result = await sendHealthPayload(checked.target, toSend);
       setSendResult(result);
       if (result.ok) {
         const now = new Date().toISOString();
@@ -228,7 +258,7 @@ export default function App() {
     } finally {
       setBusy(null);
     }
-  }, [baseUrl, payload, permissions, snapshot, token]);
+  }, [baseUrl, payload, permissions, snapshot]);
 
   const onClear = useCallback(() => {
     setBusy('clear');
@@ -348,14 +378,17 @@ export default function App() {
             )}
           </TouchableOpacity>
           <Text style={styles.text}>Hôte destination : {backendHost(baseUrl) ?? '—'}</Text>
+          <Text style={styles.text}>Hôte enregistré : {savedHost ?? '—'}</Text>
+          <Text style={styles.text}>Hôte du jeton : {tokenHost ?? 'aucun'}</Text>
           <Text style={styles.text}>Endpoint : {baseUrl || '—'}/api/health/records</Text>
         </View>
 
         <View style={styles.card}>
           <Text style={styles.cardTitle}>4 · Envoi</Text>
           <Text style={styles.note}>
-            Aucun envoi automatique : {sentCount} enregistrement(s) prêt(s), exactement ceux
-            affichés ci-dessus. L’aperçu est effacé après un envoi réussi.
+            Aucun envoi automatique : {sentCount} enregistrement(s) prêt(s). L’aperçu JSON ci-dessus
+            est partiel (3 premiers) ; l’intégralité comptée sera envoyée. L’aperçu est effacé après
+            un envoi réussi.
           </Text>
           <TouchableOpacity
             style={styles.button}

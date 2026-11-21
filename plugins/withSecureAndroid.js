@@ -1,7 +1,11 @@
+const fs = require('fs');
+const path = require('path');
+
 const {
   AndroidConfig,
   createRunOncePlugin,
   withAndroidManifest,
+  withDangerousMod,
   withMainActivity,
 } = require('@expo/config-plugins');
 
@@ -47,6 +51,31 @@ function withSecureAndroid(config) {
     config.modResults.contents = source;
     return config;
   });
+
+  // Le template Expo réintroduit SYSTEM_ALERT_WINDOW dans les source-sets debug.
+  // On le retire aussi, pour que les builds development ne soient pas exposés au tapjacking.
+  config = withDangerousMod(config, [
+    'android',
+    async (config) => {
+      for (const variant of ['debug', 'debugOptimized']) {
+        const manifestPath = path.join(
+          config.modRequest.projectRoot,
+          'android/app/src',
+          variant,
+          'AndroidManifest.xml',
+        );
+        if (!fs.existsSync(manifestPath)) {
+          continue;
+        }
+        const modResult = await AndroidConfig.Manifest.readAndroidManifestAsync(manifestPath);
+        modResult.manifest['uses-permission'] = (modResult.manifest['uses-permission'] ?? []).filter(
+          (permission) => permission.$?.['android:name'] !== 'android.permission.SYSTEM_ALERT_WINDOW',
+        );
+        await AndroidConfig.Manifest.writeAndroidManifestAsync(manifestPath, modResult);
+      }
+      return config;
+    },
+  ]);
 
   return config;
 }

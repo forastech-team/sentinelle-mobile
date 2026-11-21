@@ -79,23 +79,27 @@ Contraintes sur l'URL de base :
 - identifiants intégrés à l'URL (`https://user:pass@hôte`) et noms de domaine internationalisés
   refusés ; l'hôte résolu est affiché dans l'application avant l'envoi.
 
-Le jeton d'envoi est optionnel, stocké dans le trousseau sécurisé **et lié à l'hôte** : changer
-d'hôte le rend inutilisable. **Ne jamais committer de jeton** ni de `.env` : `.gitignore` les exclut
-et `.env.example` reste vide. L'endpoint envoyé est `{BACKEND_URL}/api/health/records`.
+Le jeton d'envoi est optionnel, stocké dans le trousseau sécurisé **et strictement lié à l'hôte
+enregistré** : il est relu du trousseau au moment de l'envoi, jamais du champ modifiable. Une URL
+modifiée mais non enregistrée refuse l'envoi, et un ancien jeton ne peut pas être réassigné à un nouvel
+hôte (sa saisie est alors demandée). **Ne jamais committer de jeton** ni de `.env` : `.gitignore` les
+exclut et `.env.example` reste vide. L'endpoint envoyé est `{BACKEND_URL}/api/health/records`.
 
 ## Confidentialité
 
 - Permissions de lecture uniquement, révocables depuis les réglages Health Connect.
 - Aucune télémétrie, aucun analytics, aucune synchronisation automatique.
-- Les données affichées sont exactement celles envoyées ; les erreurs et troncatures sont déclarées
-  dans le payload (`readErrors`, `limits.truncatedTypes`).
+- L'aperçu JSON est **partiel** (3 premiers enregistrements) ; l'intégralité comptée est envoyée.
+  Les erreurs et troncatures sont déclarées dans le payload (`readErrors`, `limits.truncatedTypes`).
 - Chaque enregistrement conserve son `source` (`dataOrigin`) lorsque Health Connect le fournit.
 - Aucune donnée de santé n'est journalisée ni envoyée dans les messages d'erreur. Le jeton reste
   en mémoire pendant la session (champ masqué) mais n'est jamais affiché en clair.
 - L'aperçu brut est effacé après un envoi réussi, et un bouton permet de le supprimer à tout moment.
-- Le plugin Android `plugins/withSecureAndroid.js` retire `SYSTEM_ALERT_WINDOW`, désactive
-  `allowBackup`, ignore les touches superposées et pose `FLAG_SECURE` (captures et vignette
-  multitâche interdites).
+- Le plugin Android `plugins/withSecureAndroid.js` retire `SYSTEM_ALERT_WINDOW` du manifeste
+  principal **et des variantes debug**, désactive `allowBackup`, ignore les touches superposées et
+  pose `FLAG_SECURE` (captures et vignette multitâche interdites). Le trafic clair reste autorisé
+  uniquement dans les builds debug pour le serveur Metro : ne distribuez jamais un build development
+  à des testeurs avec de vraies données de santé.
 
 ## Validation
 

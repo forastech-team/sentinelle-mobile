@@ -1,6 +1,6 @@
 import * as SecureStore from 'expo-secure-store';
 
-import { backendHost } from './url';
+import { backendHost, tokenMatchesHost } from './url';
 
 const BACKEND_URL_KEY = 'sentinelle.backendUrl';
 const BACKEND_TOKEN_KEY = 'sentinelle.authToken';
@@ -9,6 +9,7 @@ const BACKEND_TOKEN_HOST_KEY = 'sentinelle.authTokenHost';
 export interface BackendConfig {
   baseUrl: string;
   token?: string;
+  tokenHost?: string;
 }
 
 /** L'URL peut venir de EXPO_PUBLIC_BACKEND_URL ou être saisie par l'utilisateur. */
@@ -24,12 +25,20 @@ export async function loadBackendConfig(): Promise<BackendConfig> {
   const token = await SecureStore.getItemAsync(BACKEND_TOKEN_KEY);
   const tokenHost = await SecureStore.getItemAsync(BACKEND_TOKEN_HOST_KEY);
 
-  // Un jeton n'est jamais réutilisé pour un autre hôte : évite l'exfiltration si l'URL change.
-  if (!token || (tokenHost && tokenHost !== host)) {
+  // Jeton orphelin ou lié à un autre hôte : on le purge au lieu de le réutiliser.
+  if (!tokenMatchesHost(token, tokenHost, host)) {
+    if (token) {
+      await SecureStore.deleteItemAsync(BACKEND_TOKEN_KEY);
+      await SecureStore.deleteItemAsync(BACKEND_TOKEN_HOST_KEY);
+    }
     return { baseUrl };
   }
 
-  return { baseUrl, token };
+  return {
+    baseUrl,
+    token: token ?? undefined,
+    tokenHost: tokenHost ?? undefined,
+  };
 }
 
 export async function saveBackendUrl(baseUrl: string): Promise<void> {

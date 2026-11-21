@@ -66,3 +66,70 @@ export function backendHost(baseUrl: string): string | null {
     return null;
   }
 }
+
+/** Un jeton n'est valide que s'il a été enregistré avec l'hôte courant. */
+export function tokenMatchesHost(
+  token: string | null | undefined,
+  tokenHost: string | null | undefined,
+  host: string,
+): boolean {
+  return Boolean(token) && tokenHost === host;
+}
+
+export interface StoredBackend {
+  baseUrl: string;
+  token?: string;
+  tokenHost?: string;
+}
+
+/**
+ * Vrai si l'utilisateur tente d'enregistrer le jeton déjà présent dans le trousseau
+ * sous un nouvel hôte. Dans ce cas il faut exiger une nouvelle saisie, jamais réassigner.
+ */
+export function isTokenRebind(existing: StoredBackend, newToken: string, newHost: string): boolean {
+  return Boolean(existing.token) && newToken === existing.token && existing.tokenHost !== newHost;
+}
+
+export type SendTargetCheck =
+  | { ok: true; target: { baseUrl: string; token?: string } }
+  | { ok: false; message: string };
+
+/**
+ * Dernier rempart avant l'envoi : l'URL affichée doit être celle enregistrée, et le jeton
+ * (relu du trousseau) doit être lié à cet hôte. Une URL modifiée à l'écran mais non
+ * enregistrée ne peut donc jamais recevoir le jeton ni les données de santé.
+ */
+export function checkSendTarget(displayUrl: string, stored: StoredBackend): SendTargetCheck {
+  let validated: string;
+  try {
+    validated = validateBackendUrl(displayUrl);
+  } catch (error) {
+    return {
+      ok: false,
+      message: error instanceof Error ? error.message : "L'URL du backend est invalide.",
+    };
+  }
+
+  const targetHost = backendHost(validated);
+  if (!targetHost) {
+    return { ok: false, message: "L'URL du backend est invalide." };
+  }
+  if (backendHost(stored.baseUrl) !== targetHost) {
+    return {
+      ok: false,
+      message:
+        "Enregistrez la configuration avant l'envoi : l'URL affichée diffère de l'URL enregistrée.",
+    };
+  }
+  if (stored.token && !tokenMatchesHost(stored.token, stored.tokenHost, targetHost)) {
+    return {
+      ok: false,
+      message: 'Jeton invalide pour cet hôte : saisissez un jeton dédié puis enregistrez.',
+    };
+  }
+
+  return {
+    ok: true,
+    target: { baseUrl: validated, ...(stored.token ? { token: stored.token } : {}) },
+  };
+}

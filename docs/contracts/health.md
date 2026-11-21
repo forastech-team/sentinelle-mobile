@@ -134,5 +134,7 @@ Les unités sont normalisées : `weightKg` en kilogrammes, `energyKcal` en kiloc
   repos et politique de rétention.
 - En cas de `limits.truncatedTypes` ou `readErrors` non vides, le backend doit considérer la fenêtre
   comme partielle.
-- La lecture est plafonnée à 1000 enregistrements par type ; un dépassement est signalé dans
-  `limits.truncatedTypes`.
+- La lecture est plafonnée à 1000 enregistrements par type. Un dépassement **côté lecture** est
+  signalé dans `readErrors` (« lecture partielle ») ; `limits.truncatedTypes` couvre le cas où plus
+  de 1000 enregistrements parviennent au constructeur de payload. Les deux champs doivent être
+  traités comme une fenêtre partielle.

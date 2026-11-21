@@ -39,6 +39,8 @@ test('construit un payload daté, trié et sans permission d’écriture', () =>
   assert.equal(payload.generatedAt, '2026-11-21T12:00:01.000Z');
   assert.deepEqual(payload.records.map((record) => record.type), ['Weight', 'Steps']);
   assert.deepEqual(payload.counts, { Steps: 1, Weight: 1 });
+  assert.deepEqual(payload.readCounts, { Steps: 1, Weight: 1 });
+  assert.deepEqual(payload.readErrors, []);
   assert.deepEqual(payload.grantedPermissions, [
     { accessType: 'read', recordType: 'Steps' },
     { accessType: 'read', recordType: 'Weight' },
@@ -64,7 +66,28 @@ test('tronque par type et déclare explicitement les troncatures', () => {
 
   assert.equal(payload.records.length, 2);
   assert.deepEqual(payload.counts, { Steps: 2 });
+  assert.deepEqual(payload.readCounts, { Steps: 5 });
   assert.deepEqual(payload.limits, { maxRecordsPerType: 2, truncatedTypes: ['Steps'] });
+});
+
+test('transmet les erreurs de lecture partielle et ignore une limite invalide', () => {
+  const input = {
+    window,
+    generatedAt: '2026-11-21T12:00:01.000Z',
+    records: [],
+    grantedPermissions: [],
+    readErrors: ['HeartRate : lecture impossible (SecurityException)'],
+  };
+
+  assert.equal(buildPayload({ ...input, maxRecordsPerType: Number.NaN }).limits.maxRecordsPerType, 1000);
+  assert.equal(
+    buildPayload({ ...input, maxRecordsPerType: Number.POSITIVE_INFINITY }).limits.maxRecordsPerType,
+    1000,
+  );
+  assert.deepEqual(
+    buildPayload(input).readErrors,
+    ['HeartRate : lecture impossible (SecurityException)'],
+  );
 });
 
 test('ne fabrique aucune donnée quand aucune lecture n’a retourné d’enregistrement', () => {

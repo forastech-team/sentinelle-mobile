@@ -21,7 +21,14 @@ import {
 export type SdkState = 'available' | 'unavailable' | 'update-required';
 
 const PAGE_SIZE = 1000;
-const MAX_PAGES = 5;
+/** Un seul page : aligné sur le plafond d'envoi, pour éviter de lire inutilement des données sensibles. */
+const MAX_PAGES = 1;
+
+interface BetweenTimeRangeFilter {
+  operator: 'between';
+  startTime: string;
+  endTime: string;
+}
 
 export async function checkHealthConnect(): Promise<{
   state: SdkState;
@@ -61,20 +68,19 @@ function toHealthPermissions(
 export interface HealthSnapshot {
   window: TimeWindow;
   records: NormalizedRecord[];
-  /** Erreurs par type de données ; les autres types restent exploitables. */
+  /** Erreurs par type (codes stables) ; les autres types restent exploitables. */
   errors: string[];
 }
 
-interface BetweenTimeRangeFilter {
-  operator: 'between';
-  startTime: string;
-  endTime: string;
+interface PageResult<T extends RecordType> {
+  records: Array<RecordResult<T>>;
+  truncated: boolean;
 }
 
 async function readAllPages<T extends RecordType>(
   recordType: T,
   timeRangeFilter: BetweenTimeRangeFilter,
-): Promise<Array<RecordResult<T>>> {
+): Promise<PageResult<T>> {
   const records: Array<RecordResult<T>> = [];
   let pageToken: string | undefined;
 
@@ -86,12 +92,19 @@ async function readAllPages<T extends RecordType>(
     });
     records.push(...result.records);
     if (!result.pageToken) {
-      break;
+      return { records, truncated: false };
     }
     pageToken = result.pageToken;
   }
 
-  return records;
+  return { records, truncated: true };
+}
+
+function errorCode(error: unknown): string {
+  if (error instanceof Error && error.name) {
+    return error.name;
+  }
+  return 'ErreurInconnue';
 }
 
 /** Lit les données réelles de Health Connect. Aucune donnée n'est générée ni simulée. */
@@ -102,8 +115,16 @@ export async function readHealthSnapshot(window: TimeWindow): Promise<HealthSnap
     endTime: window.to,
   };
 
-  const steps = readAllPages('Steps', timeRangeFilter).then((records) =>
-    records.map(
+  const paginationIssues: string[] = [];
+  function notePagination(type: string, truncated: boolean): void {
+    if (truncated) {
+      paginationIssues.push(`${type} : lecture partielle (plus de ${PAGE_SIZE} enregistrements)`);
+    }
+  }
+
+  const steps = readAllPages('Steps', timeRangeFilter).then(({ records, truncated }) => {
+    notePagination('Steps', truncated);
+    return records.map(
       (record): NormalizedRecord => ({
         type: 'Steps',
         startTime: record.startTime,
@@ -111,11 +132,12 @@ export async function readHealthSnapshot(window: TimeWindow): Promise<HealthSnap
         count: record.count,
         ...(record.metadata?.dataOrigin ? { source: record.metadata.dataOrigin } : {}),
       }),
-    ),
-  );
+    );
+  });
 
-  const heartRate = readAllPages('HeartRate', timeRangeFilter).then((records) =>
-    records.map(
+  const heartRate = readAllPages('HeartRate', timeRangeFilter).then(({ records, truncated }) => {
+    notePagination('HeartRate', truncated);
+    return records.map(
       (record): NormalizedRecord => ({
         type: 'HeartRate',
         startTime: record.startTime,
@@ -126,22 +148,26 @@ export async function readHealthSnapshot(window: TimeWindow): Promise<HealthSnap
         })),
         ...(record.metadata?.dataOrigin ? { source: record.metadata.dataOrigin } : {}),
       }),
-    ),
+    );
+  });
+
+  const restingHeartRate = readAllPages('RestingHeartRate', timeRangeFilter).then(
+    ({ records, truncated }) => {
+      notePagination('RestingHeartRate', truncated);
+      return records.map(
+        (record): NormalizedRecord => ({
+          type: 'RestingHeartRate',
+          time: record.time,
+          beatsPerMinute: record.beatsPerMinute,
+          ...(record.metadata?.dataOrigin ? { source: record.metadata.dataOrigin } : {}),
+        }),
+      );
+    },
   );
 
-  const restingHeartRate = readAllPages('RestingHeartRate', timeRangeFilter).then((records) =>
-    records.map(
-      (record): NormalizedRecord => ({
-        type: 'RestingHeartRate',
-        time: record.time,
-        beatsPerMinute: record.beatsPerMinute,
-        ...(record.metadata?.dataOrigin ? { source: record.metadata.dataOrigin } : {}),
-      }),
-    ),
-  );
-
-  const sleep = readAllPages('SleepSession', timeRangeFilter).then((records) =>
-    records.map(
+  const sleep = readAllPages('SleepSession', timeRangeFilter).then(({ records, truncated }) => {
+    notePagination('SleepSession', truncated);
+    return records.map(
       (record): NormalizedRecord => ({
         type: 'SleepSession',
         startTime: record.startTime,
@@ -157,30 +183,34 @@ export async function readHealthSnapshot(window: TimeWindow): Promise<HealthSnap
           : {}),
         ...(record.metadata?.dataOrigin ? { source: record.metadata.dataOrigin } : {}),
       }),
-    ),
-  );
+    );
+  });
 
-  const weight = readAllPages('Weight', timeRangeFilter).then((records) =>
-    records.map(
+  const weight = readAllPages('Weight', timeRangeFilter).then(({ records, truncated }) => {
+    notePagination('Weight', truncated);
+    return records.map(
       (record): NormalizedRecord => ({
         type: 'Weight',
         time: record.time,
         weightKg: record.weight.inKilograms,
         ...(record.metadata?.dataOrigin ? { source: record.metadata.dataOrigin } : {}),
       }),
-    ),
-  );
+    );
+  });
 
-  const activeCalories = readAllPages('ActiveCaloriesBurned', timeRangeFilter).then((records) =>
-    records.map(
-      (record): NormalizedRecord => ({
-        type: 'ActiveCaloriesBurned',
-        startTime: record.startTime,
-        endTime: record.endTime,
-        energyKcal: record.energy.inKilocalories,
-        ...(record.metadata?.dataOrigin ? { source: record.metadata.dataOrigin } : {}),
-      }),
-    ),
+  const activeCalories = readAllPages('ActiveCaloriesBurned', timeRangeFilter).then(
+    ({ records, truncated }) => {
+      notePagination('ActiveCaloriesBurned', truncated);
+      return records.map(
+        (record): NormalizedRecord => ({
+          type: 'ActiveCaloriesBurned',
+          startTime: record.startTime,
+          endTime: record.endTime,
+          energyKcal: record.energy.inKilocalories,
+          ...(record.metadata?.dataOrigin ? { source: record.metadata.dataOrigin } : {}),
+        }),
+      );
+    },
   );
 
   const tasks: Array<{ type: string; promise: Promise<NormalizedRecord[]> }> = [
@@ -201,12 +231,11 @@ export async function readHealthSnapshot(window: TimeWindow): Promise<HealthSnap
     if (result.status === 'fulfilled') {
       records.push(...result.value);
     } else {
-      const message = result.reason instanceof Error ? result.reason.message : String(result.reason);
-      errors.push(`${type} : ${message}`);
+      errors.push(`${type} : lecture impossible (${errorCode(result.reason)})`);
     }
   });
 
-  return { window, records, errors };
+  return { window, records, errors: [...errors, ...paginationIssues].sort() };
 }
 
 export function openHealthConnectSettingsScreen(): void {

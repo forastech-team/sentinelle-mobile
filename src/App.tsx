@@ -13,7 +13,7 @@ import {
 
 import { sendHealthPayload, type SendResult } from './backend/client';
 import { loadBackendConfig, saveBackendToken, saveBackendUrl } from './backend/config';
-import { validateBackendUrl } from './backend/url';
+import { BackendConfigurationError, backendHost, validateBackendUrl } from './backend/url';
 import {
   checkHealthConnect,
   currentHealthPermissions,
@@ -23,10 +23,10 @@ import {
   type HealthSnapshot,
   type SdkState,
 } from './health/healthConnect';
-import { countByType, makeTimeWindow, type HealthPermission } from './health/model';
+import { makeTimeWindow, type HealthPermission } from './health/model';
 import { buildPayload, type HealthPayload } from './health/payload';
 
-type Busy = 'permissions' | 'read' | 'save' | 'send' | null;
+type Busy = 'permissions' | 'read' | 'save' | 'send' | 'clear' | null;
 
 const LAST_SYNC_KEY = 'sentinelle.lastSyncAt';
 
@@ -37,16 +37,35 @@ function permissionsLabel(permissions: readonly HealthPermission[]): string {
   return permissions.map((permission) => permission.recordType).join(' · ');
 }
 
-function snapshotLabel(snapshot: HealthSnapshot | null): string {
-  if (!snapshot) {
-    return 'Aucune lecture effectuée.';
+function samePermissions(
+  left: readonly HealthPermission[],
+  right: readonly HealthPermission[],
+): boolean {
+  if (left.length !== right.length) {
+    return false;
   }
-  const counts = countByType(snapshot.records);
-  const entries = Object.entries(counts);
-  if (entries.length === 0) {
-    return 'Aucune donnée réelle trouvée sur cette fenêtre de 24 h.';
+  const leftTypes = left.map((permission) => permission.recordType).sort();
+  const rightTypes = right.map((permission) => permission.recordType).sort();
+  return leftTypes.every((type, index) => type === rightTypes[index]);
+}
+
+/** Les messages techniques natifs ne sont jamais affichés tels quels. */
+function safeMessage(error: unknown, fallback: string): string {
+  if (error instanceof BackendConfigurationError) {
+    return error.message;
   }
-  return entries.map(([type, count]) => `${type} : ${count}`).join(' · ');
+  return fallback;
+}
+
+function sdkMessage(state: SdkState): string {
+  switch (state) {
+    case 'available':
+      return 'Health Connect est disponible. Vous contrôlez chaque lecture et chaque envoi.';
+    case 'update-required':
+      return 'Health Connect est installé mais trop ancien : mettez-le à jour depuis le Play Store.';
+    case 'unavailable':
+      return 'Health Connect est indisponible : Android 9+ ou application Health Connect requise.';
+  }
 }
 
 export default function App() {
@@ -54,7 +73,7 @@ export default function App() {
   const [initialized, setInitialized] = useState(false);
   const [permissions, setPermissions] = useState<HealthPermission[]>([]);
   const [snapshot, setSnapshot] = useState<HealthSnapshot | null>(null);
-  const [payloadPreview, setPayloadPreview] = useState<HealthPayload | null>(null);
+  const [payload, setPayload] = useState<HealthPayload | null>(null);
   const [baseUrl, setBaseUrl] = useState('');
   const [token, setToken] = useState('');
   const [lastSync, setLastSync] = useState<string | null>(null);
@@ -72,21 +91,24 @@ export default function App() {
           AsyncStorage.getItem(LAST_SYNC_KEY),
         ]);
         if (!mounted) return;
+
         setSdkState(health.state);
         setInitialized(health.initialized);
-        setPermissions(await currentHealthPermissions());
         setBaseUrl(config.baseUrl);
         setToken(config.token ?? '');
         setLastSync(storedSync);
-        setMessage(
-          health.state === 'available'
-            ? 'Health Connect est disponible. Vous contrôlez chaque lecture et chaque envoi.'
-            : 'Health Connect est indisponible sur cet appareil (Android 9+ ou application Health Connect requise).',
-        );
-      } catch (error) {
-        if (mounted) {
-          setMessage(error instanceof Error ? error.message : 'Initialisation impossible.');
+
+        if (health.state === 'available' && health.initialized) {
+          try {
+            const granted = await currentHealthPermissions();
+            if (mounted) setPermissions(granted);
+          } catch {
+            if (mounted) setPermissions([]);
+          }
         }
+        if (mounted) setMessage(sdkMessage(health.state));
+      } catch (error) {
+        if (mounted) setMessage(safeMessage(error, 'Initialisation impossible.'));
       }
     })();
     return () => {
@@ -105,8 +127,8 @@ export default function App() {
           ? `${granted.length} permission(s) de lecture accordée(s).`
           : 'Aucune permission accordée.',
       );
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Demande de permission impossible.');
+    } catch {
+      setMessage('Demande de permission impossible.');
     } finally {
       setBusy(null);
     }
@@ -117,24 +139,25 @@ export default function App() {
     setMessage('');
     setSendResult(null);
     try {
+      const granted = await currentHealthPermissions().catch(() => permissions);
       const nextSnapshot = await readHealthSnapshot(makeTimeWindow());
+      const nextPayload = buildPayload({
+        window: nextSnapshot.window,
+        records: nextSnapshot.records,
+        grantedPermissions: granted,
+        readErrors: nextSnapshot.errors,
+      });
+      setPermissions(granted);
       setSnapshot(nextSnapshot);
-      const counts = countByType(nextSnapshot.records);
-      const total = Object.values(counts).reduce((sum, count) => sum + count, 0);
-      const errors =
+      setPayload(nextPayload);
+      const total = Object.values(nextPayload.counts).reduce((sum, count) => sum + count, 0);
+      const partial =
         nextSnapshot.errors.length > 0
-          ? ` Lecture partielle : ${nextSnapshot.errors.join(' ; ')}`
+          ? ` Lecture partielle (${nextSnapshot.errors.length} type(s)).`
           : '';
-      setMessage(`${total} enregistrement(s) réel(s) lu(s).${errors}`);
-      setPayloadPreview(
-        buildPayload({
-          window: nextSnapshot.window,
-          records: nextSnapshot.records,
-          grantedPermissions: permissions,
-        }),
-      );
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Lecture Health Connect impossible.');
+      setMessage(`${total} enregistrement(s) réel(s) lu(s).${partial}`);
+    } catch {
+      setMessage('Lecture Health Connect impossible.');
     } finally {
       setBusy(null);
     }
@@ -145,18 +168,23 @@ export default function App() {
     setMessage('');
     try {
       const validated = validateBackendUrl(baseUrl);
+      const trimmedToken = token.trim();
       setBaseUrl(validated);
-      await Promise.all([saveBackendUrl(validated), saveBackendToken(token.trim())]);
+      setToken(trimmedToken);
+      await Promise.all([
+        saveBackendUrl(validated),
+        saveBackendToken(trimmedToken, validated),
+      ]);
       setMessage('Configuration enregistrée dans le stockage sécurisé.');
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Enregistrement impossible.');
+      setMessage(safeMessage(error, 'Enregistrement de la configuration impossible.'));
     } finally {
       setBusy(null);
     }
   }, [baseUrl, token]);
 
   const onSend = useCallback(async () => {
-    if (!snapshot) {
+    if (!snapshot || !payload) {
       setMessage('Lisez d’abord vos données avant de les envoyer.');
       return;
     }
@@ -164,27 +192,55 @@ export default function App() {
     setMessage('');
     setSendResult(null);
     try {
-      const payload = buildPayload({
-        window: snapshot.window,
-        records: snapshot.records,
-        grantedPermissions: permissions,
-      });
-      const result = await sendHealthPayload({ baseUrl, ...(token ? { token } : {}) }, payload);
+      const freshPermissions = await currentHealthPermissions().catch(() => permissions);
+      let toSend = payload;
+      if (!samePermissions(freshPermissions, payload.grantedPermissions)) {
+        toSend = buildPayload({
+          window: payload.window,
+          records: snapshot.records,
+          grantedPermissions: freshPermissions,
+          readErrors: snapshot.errors,
+          generatedAt: payload.generatedAt,
+          maxRecordsPerType: payload.limits.maxRecordsPerType,
+        });
+        setPayload(toSend);
+        setPermissions(freshPermissions);
+        setMessage('Permissions rafraîchies avant l’envoi.');
+      }
+
+      const result = await sendHealthPayload(
+        { baseUrl, ...(token.trim() ? { token: token.trim() } : {}) },
+        toSend,
+      );
       setSendResult(result);
       if (result.ok) {
         const now = new Date().toISOString();
         await AsyncStorage.setItem(LAST_SYNC_KEY, now);
         setLastSync(now);
+        setSnapshot(null);
+        setPayload(null);
+        setMessage(`${result.message} Aperçu local effacé après envoi.`);
+      } else {
+        setMessage(result.message);
       }
-      setMessage(result.message);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Envoi impossible.');
+      setMessage(safeMessage(error, 'Envoi impossible.'));
     } finally {
       setBusy(null);
     }
-  }, [baseUrl, permissions, snapshot, token]);
+  }, [baseUrl, payload, permissions, snapshot, token]);
+
+  const onClear = useCallback(() => {
+    setBusy('clear');
+    setSnapshot(null);
+    setPayload(null);
+    setSendResult(null);
+    setMessage('Données de santé locales effacées.');
+    setBusy(null);
+  }, []);
 
   const isBusy = busy !== null;
+  const sentCount = payload ? Object.values(payload.counts).reduce((sum, count) => sum + count, 0) : 0;
 
   return (
     <View style={styles.container}>
@@ -200,8 +256,9 @@ export default function App() {
           <Text style={styles.text}>Statut Health Connect : {sdkState}</Text>
           <Text style={styles.text}>Initialisé : {initialized ? 'oui' : 'non'}</Text>
           <Text style={styles.note}>
-            Android uniquement. Health Connect doit être installé (intégré à Android 14+) et l’écran
-            verrouillé. iOS / Apple Health n’est pas pris en charge dans cette version.
+            Health Connect est requis sur Android 9+ (minSdk 26 = Android 8.0) et intégré au système
+            dès Android 14. Un verrouillage d’écran est nécessaire. iOS / Apple Health n’est pas pris
+            en charge dans cette version.
           </Text>
           <TouchableOpacity style={styles.buttonSecondary} onPress={openHealthConnectSettingsScreen}>
             <Text style={styles.buttonText}>Ouvrir les réglages Health Connect</Text>
@@ -230,11 +287,18 @@ export default function App() {
 
         <View style={styles.card}>
           <Text style={styles.cardTitle}>2 · Lecture des 24 dernières heures</Text>
-          <Text style={styles.text}>{snapshotLabel(snapshot)}</Text>
-          {snapshot && snapshot.records.length > 0 ? (
-            <Text style={styles.mono}>
-              {JSON.stringify(snapshot.records.slice(0, 3), null, 2)}
-            </Text>
+          <Text style={styles.text}>
+            {payload
+              ? Object.entries(payload.counts)
+                  .map(([type, count]) => `${type} : ${count}`)
+                  .join(' · ') || 'Aucune donnée réelle trouvée sur cette fenêtre.'
+              : 'Aucune lecture effectuée.'}
+          </Text>
+          {payload && payload.readErrors.length > 0 ? (
+            <Text style={styles.note}>Lecture partielle : {payload.readErrors.join(' ; ')}</Text>
+          ) : null}
+          {payload && payload.records.length > 0 ? (
+            <Text style={styles.mono}>{JSON.stringify(payload.records.slice(0, 3), null, 2)}</Text>
           ) : null}
           <TouchableOpacity
             style={styles.button}
@@ -252,8 +316,9 @@ export default function App() {
         <View style={styles.card}>
           <Text style={styles.cardTitle}>3 · Backend</Text>
           <Text style={styles.note}>
-            URL de base du backend Sentinelle. Le jeton, si votre backend en exige un, est stocké dans
-            le trousseau sécurisé et n’est jamais affiché ni journalisé.
+            URL de base (origine uniquement, sans chemin ni paramètres). Le jeton, si votre backend
+            en exige un, est stocké dans le trousseau sécurisé et lié à cet hôte. Il n’est jamais
+            journalisé, mais reste en mémoire pendant que l’application est ouverte.
           </Text>
           <TextInput
             style={styles.input}
@@ -282,18 +347,19 @@ export default function App() {
               <Text style={styles.buttonText}>Enregistrer la configuration</Text>
             )}
           </TouchableOpacity>
+          <Text style={styles.text}>Hôte destination : {backendHost(baseUrl) ?? '—'}</Text>
           <Text style={styles.text}>Endpoint : {baseUrl || '—'}/api/health/records</Text>
         </View>
 
         <View style={styles.card}>
           <Text style={styles.cardTitle}>4 · Envoi</Text>
           <Text style={styles.note}>
-            Aucun envoi automatique : les données affichées ci-dessus ne partent que lorsque vous
-            appuyez sur le bouton. {payloadPreview ? `${payloadPreview.records.length} enregistrement(s) prêt(s).` : ''}
+            Aucun envoi automatique : {sentCount} enregistrement(s) prêt(s), exactement ceux
+            affichés ci-dessus. L’aperçu est effacé après un envoi réussi.
           </Text>
           <TouchableOpacity
             style={styles.button}
-            disabled={isBusy || !snapshot || snapshot.records.length === 0 || !baseUrl}
+            disabled={isBusy || !payload || payload.records.length === 0 || !baseUrl}
             onPress={onSend}
           >
             {busy === 'send' ? (
@@ -302,14 +368,19 @@ export default function App() {
               <Text style={styles.buttonText}>Envoyer au backend</Text>
             )}
           </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.buttonSecondary}
+            disabled={isBusy || (!payload && !snapshot)}
+            onPress={onClear}
+          >
+            <Text style={styles.buttonText}>Supprimer les données locales</Text>
+          </TouchableOpacity>
           {sendResult ? (
             <Text style={sendResult.ok ? styles.success : styles.error}>
               {sendResult.ok ? '✓' : '✕'} {sendResult.message}
             </Text>
           ) : null}
-          <Text style={styles.text}>
-            Dernier envoi réussi : {lastSync ?? 'jamais'}
-          </Text>
+          <Text style={styles.text}>Dernier envoi réussi : {lastSync ?? 'jamais'}</Text>
         </View>
 
         {message ? <Text style={styles.message}>{message}</Text> : null}

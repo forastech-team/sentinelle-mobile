@@ -13,6 +13,8 @@ export interface PayloadInput {
   window: TimeWindow;
   records: readonly NormalizedRecord[];
   grantedPermissions: readonly HealthPermission[];
+  /** Erreurs de lecture par type : une fenêtre peut être partielle. */
+  readErrors?: readonly string[];
   generatedAt?: string;
   maxRecordsPerType?: number;
 }
@@ -24,11 +26,16 @@ export interface HealthPayload {
   generatedAt: string;
   window: TimeWindow;
   grantedPermissions: HealthPermission[];
+  /** Comptes avant troncature : ce qui a réellement été lu. */
+  readCounts: Record<string, number>;
+  /** Comptes après troncature : ce qui est réellement envoyé. */
+  counts: Record<string, number>;
+  /** Types dont la lecture a échoué, avec un code stable. */
+  readErrors: string[];
   limits: {
     maxRecordsPerType: number;
     truncatedTypes: string[];
   };
-  counts: Record<string, number>;
   records: NormalizedRecord[];
 }
 
@@ -38,12 +45,25 @@ function recordTime(record: NormalizedRecord): string {
     : record.startTime;
 }
 
+function countsOf(records: readonly NormalizedRecord[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const record of records) {
+    counts[record.type] = (counts[record.type] ?? 0) + 1;
+  }
+  return counts;
+}
+
 /**
  * Construit le corps JSON envoyé au backend. Fonction pure : aucun appel natif,
- * aucun secret, aucune donnée simulée. Les troncatures sont explicitement déclarées.
+ * aucun secret, aucune donnée simulée. Les troncatures et erreurs sont déclarées.
  */
 export function buildPayload(input: PayloadInput): HealthPayload {
-  const maxRecordsPerType = Math.max(1, Math.floor(input.maxRecordsPerType ?? DEFAULT_MAX_RECORDS_PER_TYPE));
+  const requestedLimit = input.maxRecordsPerType ?? DEFAULT_MAX_RECORDS_PER_TYPE;
+  const finiteLimit = Number.isFinite(requestedLimit)
+    ? requestedLimit
+    : DEFAULT_MAX_RECORDS_PER_TYPE;
+  const maxRecordsPerType = Math.max(1, Math.floor(finiteLimit));
+
   const sorted = [...input.records].sort((a, b) =>
     recordTime(a).localeCompare(recordTime(b)),
   );
@@ -62,11 +82,6 @@ export function buildPayload(input: PayloadInput): HealthPayload {
     kept.push(record);
   }
 
-  const counts: Record<string, number> = {};
-  for (const record of kept) {
-    counts[record.type] = (counts[record.type] ?? 0) + 1;
-  }
-
   const grantedPermissions = input.grantedPermissions
     .filter((permission) => permission.accessType === 'read')
     .map((permission) => ({
@@ -82,11 +97,13 @@ export function buildPayload(input: PayloadInput): HealthPayload {
     generatedAt: input.generatedAt ?? new Date().toISOString(),
     window: input.window,
     grantedPermissions,
+    readCounts: countsOf(input.records),
+    counts: countsOf(kept),
+    readErrors: [...(input.readErrors ?? [])],
     limits: {
       maxRecordsPerType,
       truncatedTypes: [...truncatedTypes].sort(),
     },
-    counts,
     records: kept,
   };
 }
